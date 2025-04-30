@@ -89,10 +89,10 @@ def load_sentiment_model(model_name):
             
             # Set model based on selection
             if model_name == "Base Model":
-                progress_text.text("Loading DistilBERT model...")
-                model_id = "distilbert-base-uncased-finetuned-sst-2-english"
+                progress_text.text("Loading cardiffnlp/twitter-roberta-base-sentiment model...")
+                model_id = "cardiffnlp/twitter-roberta-base-sentiment"
             else:  # Fine-tuned model
-                progress_text.text("Loading BERTweet model...")
+                progress_text.text("Loading finiteautomata/bertweet-base-sentiment-analysis model...")
                 model_id = "finiteautomata/bertweet-base-sentiment-analysis"
             
             # Add error handling for offline or connection issues
@@ -131,6 +131,7 @@ def load_sentiment_model(model_name):
         return None
 
 # Function to analyze sentiment
+# Function to analyze sentiment
 def analyze_sentiment(text, model):
     """Analyze the sentiment of the given text using the loaded model."""
     try:
@@ -150,22 +151,33 @@ def analyze_sentiment(text, model):
         # Process the text with the model
         result = model(clean_text)
         
-        # Map the result to our format (positive, negative)
-        # Different models may have different label formats
+        # Map the result to our format (positive, negative, neutral)
         label = result[0]['label'].lower()
         score = result[0]['score']
         
-        # Map the label to our standard format
-        if 'positive' in label or label == 'pos':
+        # Different models use different label formats
+        # cardiffnlp/twitter-roberta-base-sentiment uses labels like: LABEL_0, LABEL_1, LABEL_2
+        # finiteautomata/bertweet-base-sentiment-analysis uses labels like: POS, NEG, NEU
+        
+        # Handle different label formats
+        if 'label_0' in label:
+            sentiment = 'negative'  # In the RoBERTa model, LABEL_0 is negative
+        elif 'label_1' in label:
+            sentiment = 'neutral'   # In the RoBERTa model, LABEL_1 is neutral
+        elif 'label_2' in label:
+            sentiment = 'positive'  # In the RoBERTa model, LABEL_2 is positive
+        elif 'negative' in label or label == 'neg':
+            sentiment = 'negative'
+        elif 'positive' in label or label == 'pos':
             sentiment = 'positive'
         else:
-            sentiment = 'negative'
+            sentiment = 'neutral'
             
         return sentiment, score
     except Exception as e:
         # Log the error, but don't break the app flow
         print(f"Error analyzing sentiment: {str(e)}")
-        return "negative", 0.5  # Default to negative as a fallback
+        return "neutral", 0.5  # Default to neutral as a fallback
 
 # Function to process batch sentiment analysis and evaluate against true labels
 def batch_analyze_sentiment(df, text_column, label_column, model):
@@ -204,10 +216,12 @@ def batch_analyze_sentiment(df, text_column, label_column, model):
             true_label = df.iloc[j][label_column].lower()  # Ensure lowercase for consistency
             
             # Standardize the true label format
-            if true_label == 'pos' or true_label == '1' or true_label == 1:
+            if true_label in ['positive', 'pos', '1', '1.0']:
                 true_label = 'positive'
-            elif true_label == 'neg' or true_label == '0' or true_label == 0:
+            elif true_label in ['negative', 'neg', '0', '0.0', '-1', '-1.0']:
                 true_label = 'negative'
+            else:
+                true_label = 'neutral'  # Anything else is considered neutral
             
             # Update the progress bar
             progress = int((j + 1) / total_rows * 100)
@@ -252,29 +266,60 @@ def batch_analyze_sentiment(df, text_column, label_column, model):
     # Filter out errors
     valid_results = result_df[result_df['predicted_sentiment'] != 'error']
     
-    # Calculate confusion matrix
+    # Calculate confusion matrix for 3 classes
     cm = confusion_matrix(
         valid_results['true_sentiment'], 
         valid_results['predicted_sentiment'],
-        labels=['positive', 'negative']
+        labels=['positive', 'neutral', 'negative']
     )
     
-    # Calculate metrics
+    # Calculate metrics - using macro average for multiclass
     accuracy = accuracy_score(valid_results['true_sentiment'], valid_results['predicted_sentiment'])
     precision = precision_score(
         valid_results['true_sentiment'], 
         valid_results['predicted_sentiment'],
-        pos_label='positive'
+        labels=['positive', 'neutral', 'negative'],
+        average='macro',
+        zero_division=0
     )
     recall = recall_score(
         valid_results['true_sentiment'], 
         valid_results['predicted_sentiment'],
-        pos_label='positive'
+        labels=['positive', 'neutral', 'negative'],
+        average='macro',
+        zero_division=0
     )
     f1 = f1_score(
         valid_results['true_sentiment'], 
         valid_results['predicted_sentiment'],
-        pos_label='positive'
+        labels=['positive', 'neutral', 'negative'],
+        average='macro',
+        zero_division=0
+    )
+    
+    # Calculate per-class metrics
+    class_precision = precision_score(
+        valid_results['true_sentiment'], 
+        valid_results['predicted_sentiment'],
+        labels=['positive', 'neutral', 'negative'],
+        average=None,
+        zero_division=0
+    )
+    
+    class_recall = recall_score(
+        valid_results['true_sentiment'], 
+        valid_results['predicted_sentiment'],
+        labels=['positive', 'neutral', 'negative'],
+        average=None,
+        zero_division=0
+    )
+    
+    class_f1 = f1_score(
+        valid_results['true_sentiment'], 
+        valid_results['predicted_sentiment'],
+        labels=['positive', 'neutral', 'negative'],
+        average=None,
+        zero_division=0
     )
     
     # Save evaluation metrics
@@ -283,7 +328,10 @@ def batch_analyze_sentiment(df, text_column, label_column, model):
         'accuracy': accuracy,
         'precision': precision,
         'recall': recall,
-        'f1': f1
+        'f1': f1,
+        'class_precision': class_precision,
+        'class_recall': class_recall,
+        'class_f1': class_f1
     }
     
     # Create a detailed error log for download if needed
@@ -323,7 +371,7 @@ with st.sidebar:
         This app uses Hugging Face transformer models to analyze sentiment in text.
         Upload your dataset with two columns:
         - First column: Text
-        - Second column: Label (positive/negative)
+        - Second column: Label (positive/neutral/negative)
         
         The app will calculate accuracy metrics and confusion matrix.
         """
@@ -350,14 +398,14 @@ with st.sidebar:
                     # Add model info
                     if model_option == "Base Model":
                         st.info("""
-                        **Model:** DistilBERT (distilbert-base-uncased-finetuned-sst-2-english)
-                        **Description:** A smaller, faster version of BERT fine-tuned on the Stanford Sentiment Treebank.
-                        **Labels:** Positive/Negative (binary classification)
+                        **Model:** cardiffnlp/twitter-roberta-base-sentiment
+                        **Description:** A RoBERTa model trained on Twitter data for sentiment analysis.
+                        **Labels:** Positive/Neutral/Negative (3-class classification)
                         """)
                     else:
                         st.info("""
-                        **Model:** BERTweet (finiteautomata/bertweet-base-sentiment-analysis)
-                        **Description:** A RoBERTa model trained on Twitter data and fine-tuned for sentiment analysis.
+                        **Model:** finiteautomata/bertweet-base-sentiment-analysis
+                        **Description:** A BERTweet model fine-tuned for sentiment analysis on Twitter data.
                         **Labels:** Positive/Neutral/Negative (3-class classification)
                         """)
             except Exception as e:
@@ -383,6 +431,8 @@ with st.sidebar:
                                           "amazing", "fantastic", "delighted", "success", "successful", "boom", "growth"]
                     self.negative_words = ["bad", "awful", "terrible", "negative", "sad", "angry", "hate", "poor", "terrible",
                                           "horrible", "disappointing", "failure", "crash", "crisis", "decline", "layoff"]
+                    self.neutral_words = ["okay", "ok", "fine", "average", "neutral", "moderate", "so-so", "fair", 
+                                         "decent", "standard", "usual", "normal", "regular", "common"]
                 
                 def __call__(self, text):
                     if not isinstance(text, str):
@@ -390,19 +440,26 @@ with st.sidebar:
                     
                     text = text.lower()
                     
-                    # Count positive and negative words
+                    # Count positive, negative and neutral words
                     pos_count = sum(1 for word in self.positive_words if word in text)
                     neg_count = sum(1 for word in self.negative_words if word in text)
+                    neut_count = sum(1 for word in self.neutral_words if word in text)
                     
                     # Determine sentiment
-                    if pos_count > neg_count:
-                        return [{"label": "POSITIVE", "score": 0.7 + (0.2 * (pos_count / (pos_count + neg_count + 1)))}]
+                    max_count = max(pos_count, neg_count, neut_count)
+                    if max_count == 0:
+                        # No sentiment words found, default to neutral
+                        return [{"label": "NEUTRAL", "score": 0.7}]
+                    elif max_count == pos_count:
+                        return [{"label": "POSITIVE", "score": 0.6 + (0.3 * (pos_count / (pos_count + neg_count + neut_count + 1)))}]
+                    elif max_count == neg_count:
+                        return [{"label": "NEGATIVE", "score": 0.6 + (0.3 * (neg_count / (pos_count + neg_count + neut_count + 1)))}]
                     else:
-                        return [{"label": "NEGATIVE", "score": 0.7 + (0.2 * (neg_count / (pos_count + neg_count + 1)))}]
+                        return [{"label": "NEUTRAL", "score": 0.6 + (0.3 * (neut_count / (pos_count + neg_count + neut_count + 1)))}]
             
             st.session_state['sentiment_analyzer'] = SimpleClassifier()
             st.success("✅ Simple fallback classifier loaded successfully!")
-            st.info("This is a basic rule-based classifier that looks for positive and negative keywords.")
+            st.info("This is a basic rule-based classifier that looks for positive, neutral, and negative keywords.")
 
 # Main content area
 st.markdown('<h1 class="main-header">📊 Sentiment Analysis Evaluation</h1>', unsafe_allow_html=True)
@@ -435,7 +492,7 @@ with tabs[0]:
             df = pd.read_csv(uploaded_file, encoding=selected_encoding, encoding_errors=error_handling)
             
             # Display info about required format
-            st.info("Expected format: First column is text, second column is sentiment label (positive/negative)")
+            st.info("Expected format: First column is text, second column is sentiment label (positive/neutral/negative)")
             
             # Display the dataframe
             st.markdown("### Data Preview")
@@ -488,10 +545,14 @@ with tabs[0]:
                     unique_labels = df[label_column].astype(str).str.lower().unique()
                     st.markdown("### Label Distribution")
                     
-                    # Standardize labels
-                    label_counts = df[label_column].astype(str).str.lower().map(
-                        lambda x: 'positive' if x in ['positive', 'pos', '1', '1.0'] else 'negative'
-                    ).value_counts()
+                    # Standardize labels for visualization
+                    standardized_labels = df[label_column].astype(str).str.lower().apply(
+                        lambda x: 'positive' if x in ['positive', 'pos', '1', '1.0'] 
+                        else ('negative' if x in ['negative', 'neg', '0', '0.0', '-1', '-1.0'] 
+                             else 'neutral')
+                    )
+                    
+                    label_counts = standardized_labels.value_counts()
                     
                     # Create a bar chart
                     fig = px.bar(
@@ -500,6 +561,7 @@ with tabs[0]:
                         color=label_counts.index,
                         color_discrete_map={
                             'positive': '#4CAF50',
+                            'neutral': '#FFC107',
                             'negative': '#F44336'
                         },
                         labels={'x': 'Sentiment', 'y': 'Count'}
@@ -569,14 +631,14 @@ with tabs[0]:
                                     # Format confusion matrix
                                     cm = cm_data['matrix']
                                     
-                                    fig, ax = plt.subplots(figsize=(8, 6))
+                                    fig, ax = plt.subplots(figsize=(10, 8))
                                     sns.heatmap(
                                         cm, 
                                         annot=True, 
                                         fmt='d',
                                         cmap='Blues',
-                                        xticklabels=['Predicted Positive', 'Predicted Negative'],
-                                        yticklabels=['Actual Positive', 'Actual Negative']
+                                        xticklabels=['Predicted Positive', 'Predicted Neutral', 'Predicted Negative'],
+                                        yticklabels=['Actual Positive', 'Actual Neutral', 'Actual Negative']
                                     )
                                     plt.ylabel('True Label')
                                     plt.xlabel('Predicted Label')
@@ -590,11 +652,23 @@ with tabs[0]:
                                     with col1:
                                         st.metric("Accuracy", f"{cm_data['accuracy']:.4f}")
                                     with col2:
-                                        st.metric("Precision", f"{cm_data['precision']:.4f}")
+                                        st.metric("Precision (macro)", f"{cm_data['precision']:.4f}")
                                     with col3:
-                                        st.metric("Recall", f"{cm_data['recall']:.4f}")
+                                        st.metric("Recall (macro)", f"{cm_data['recall']:.4f}")
                                     with col4:
-                                        st.metric("F1 Score", f"{cm_data['f1']:.4f}")
+                                        st.metric("F1 Score (macro)", f"{cm_data['f1']:.4f}")
+                                
+                                    # Display per-class metrics
+                                    st.markdown("### Per-Class Metrics")
+                                    
+                                    class_metrics = pd.DataFrame({
+                                        'Class': ['Positive', 'Neutral', 'Negative'],
+                                        'Precision': cm_data['class_precision'],
+                                        'Recall': cm_data['class_recall'],
+                                        'F1 Score': cm_data['class_f1']
+                                    })
+                                    
+                                    st.dataframe(class_metrics, hide_index=True)
                                 
                                 # Option to download results
                                 csv = results_df.to_csv(index=False, encoding='utf-8')
@@ -637,15 +711,15 @@ with tabs[1]:
         # Create an annotated heatmap of the confusion matrix
         cm = cm_data['matrix']
         
-        fig, ax = plt.subplots(figsize=(10, 8))
+        fig, ax = plt.subplots(figsize=(12, 10))
         sns.set(font_scale=1.4)
         sns.heatmap(
             cm, 
             annot=True, 
             fmt='d',
             cmap='Blues',
-            xticklabels=['Predicted Positive', 'Predicted Negative'],
-            yticklabels=['Actual Positive', 'Actual Negative'],
+            xticklabels=['Predicted Positive', 'Predicted Neutral', 'Predicted Negative'],
+            yticklabels=['Actual Positive', 'Actual Neutral', 'Actual Negative'],
             annot_kws={'size': 16}
         )
         plt.ylabel('True Label', fontsize=14)
@@ -656,7 +730,8 @@ with tabs[1]:
         # Display performance metrics in a visually appealing way
         st.markdown("### Performance Metrics")
         
-        col1, col2 = st.columns(2)
+        # Display overall metrics
+        col1, col2 = st.columns([1, 2])
         
         with col1:
             # Create a gauge chart for accuracy
@@ -667,181 +742,244 @@ with tabs[1]:
                 title={'text': "Accuracy"},
                 gauge={
                     'axis': {'range': [0, 1]},
-                    'bar': {'color': "#1E88E5"},
+                    'bar': {'color': "lightgreen"},
                     'steps': [
-                        {'range': [0, 0.6], 'color': "#EF5350"},
-                        {'range': [0.6, 0.8], 'color': "#FFCA28"},
-                        {'range': [0.8, 1], 'color': "#66BB6A"}
-                    ]
+                        {'range': [0, 0.5], 'color': "red"},
+                        {'range': [0.5, 0.7], 'color': "orange"},
+                        {'range': [0.7, 0.9], 'color': "lightgreen"},
+                        {'range': [0.9, 1], 'color': "green"}
+                    ],
+                    'threshold': {
+                        'line': {'color': "red", 'width': 4},
+                        'thickness': 0.75,
+                        'value': 0.7
+                    }
                 }
             ))
+            
             fig.update_layout(height=300)
-            st.plotly_chart(fig)
+            st.plotly_chart(fig, use_container_width=True)
         
         with col2:
-            # Create a radar chart for precision, recall, and F1
-            fig = go.Figure()
-
-            fig.add_trace(go.Scatterpolar(
-                r=[cm_data['precision'], cm_data['recall'], cm_data['f1']],
-                theta=['Precision', 'Recall', 'F1 Score'],
-                fill='toself',
-                name='Metrics',
-                fillcolor='rgba(76, 175, 80, 0.2)',
-                line_color='#4CAF50'
-            ))
-
-            fig.update_layout(
-                polar=dict(
-                    radialaxis=dict(
-                        visible=True,
-                        range=[0, 1]
-                    )
-                ),
-                showlegend=False,
-                height=300
+            # Create a horizontal bar chart for precision, recall, and F1
+            metrics_data = {
+                'Metric': ['Precision', 'Recall', 'F1 Score'],
+                'Value': [cm_data['precision'], cm_data['recall'], cm_data['f1']]
+            }
+            
+            fig = px.bar(
+                metrics_data,
+                x='Value',
+                y='Metric',
+                orientation='h',
+                color='Value',
+                color_continuous_scale=[(0, "red"), (0.5, "yellow"), (0.7, "lightgreen"), (1, "green")],
+                range_color=[0, 1],
+                labels={'Value': 'Score'},
+                text_auto='.4f'
             )
-            st.plotly_chart(fig)
+            
+            fig.update_layout(height=300)
+            st.plotly_chart(fig, use_container_width=True)
         
-        # Display detailed metrics
-        st.markdown("### Detailed Metrics")
+        # Display per-class metrics
+        st.markdown("### Per-Class Performance")
         
-        metrics_df = pd.DataFrame({
-            'Metric': ['Accuracy', 'Precision', 'Recall', 'F1 Score'],
-            'Value': [
-                cm_data['accuracy'], 
-                cm_data['precision'], 
-                cm_data['recall'], 
-                cm_data['f1']
-            ]
+        # Create a dataframe with class metrics
+        class_metrics = pd.DataFrame({
+            'Class': ['Positive', 'Neutral', 'Negative'],
+            'Precision': cm_data['class_precision'],
+            'Recall': cm_data['class_recall'],
+            'F1 Score': cm_data['class_f1']
         })
         
-        st.dataframe(metrics_df, hide_index=True)
+        # Create a grouped bar chart
+        fig = px.bar(
+            class_metrics.melt(id_vars='Class', var_name='Metric', value_name='Value'),
+            x='Class',
+            y='Value',
+            color='Metric',
+            barmode='group',
+            text_auto='.3f',
+            color_discrete_map={
+                'Precision': '#1E88E5',
+                'Recall': '#43A047',
+                'F1 Score': '#FB8C00'
+            }
+        )
         
-        # Error analysis section
-        st.markdown("### Error Analysis")
+        fig.update_layout(
+            yaxis_range=[0, 1],
+            legend_title_text='',
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
         
-        # Find examples of false positives and false negatives
-        false_positives = results_df[
-            (results_df['predicted_sentiment'] == 'positive') & 
-            (results_df['true_sentiment'] == 'negative')
-        ].sort_values('confidence', ascending=False)
+        st.plotly_chart(fig, use_container_width=True)
         
-        false_negatives = results_df[
-            (results_df['predicted_sentiment'] == 'negative') & 
-            (results_df['true_sentiment'] == 'positive')
-        ].sort_values('confidence', ascending=False)
+        # Detailed results view
+        st.markdown("### Detailed Results")
         
-        # Display false positives and false negatives
-        error_tabs = st.tabs(["False Positives", "False Negatives"])
+        # Add filters
+        col1, col2 = st.columns(2)
         
-        with error_tabs[0]:
-            st.write(f"Total False Positives: {len(false_positives)}")
-            if len(false_positives) > 0:
-                st.markdown("Top examples where model incorrectly predicted POSITIVE:")
-                st.dataframe(false_positives.head(10)[[text_column, 'confidence']])
-            else:
-                st.info("No false positives found.")
+        with col1:
+            sentiment_filter = st.multiselect(
+                "Filter by predicted sentiment",
+                options=['positive', 'neutral', 'negative', 'error'],
+                default=['positive', 'neutral', 'negative', 'error']
+            )
         
-        with error_tabs[1]:
-            st.write(f"Total False Negatives: {len(false_negatives)}")
-            if len(false_negatives) > 0:
-                st.markdown("Top examples where model incorrectly predicted NEGATIVE:")
-                st.dataframe(false_negatives.head(10)[[text_column, 'confidence']])
-            else:
-                st.info("No false negatives found.")
+        with col2:
+            # Add confidence slider
+            min_confidence = float(results_df['confidence'].min()) if not results_df.empty else 0.0
+            max_confidence = float(results_df['confidence'].max()) if not results_df.empty else 1.0
+            confidence_range = st.slider(
+                "Confidence score range",
+                min_value=0.0,
+                max_value=1.0,
+                value=(min_confidence, max_confidence),
+                step=0.05
+            )
+        
+        # Filter the results based on selections
+        filtered_df = results_df[
+            (results_df['predicted_sentiment'].isin(sentiment_filter)) &
+            (results_df['confidence'] >= confidence_range[0]) &
+            (results_df['confidence'] <= confidence_range[1])
+        ]
+        
+        # Add option to show correct/incorrect predictions
+        prediction_status = st.radio(
+            "Show predictions",
+            ["All", "Correct Predictions", "Incorrect Predictions"],
+            horizontal=True
+        )
+        
+        if prediction_status == "Correct Predictions":
+            filtered_df = filtered_df[filtered_df['predicted_sentiment'] == filtered_df['true_sentiment']]
+        elif prediction_status == "Incorrect Predictions":
+            filtered_df = filtered_df[filtered_df['predicted_sentiment'] != filtered_df['true_sentiment']]
+        
+        # Display the filtered dataframe
+        if not filtered_df.empty:
+            st.dataframe(filtered_df, use_container_width=True)
+            
+            # Download button for filtered results
+            csv = filtered_df.to_csv(index=False, encoding='utf-8')
+            b64 = base64.b64encode(csv.encode()).decode()
+            href = f'<a href="data:file/csv;base64,{b64}" download="filtered_sentiment_results.csv">Download Filtered Results</a>'
+            st.markdown(href, unsafe_allow_html=True)
+        else:
+            st.info("No results match the selected filters.")
+        
+        # Export full dashboard report as HTML
+        st.markdown("### Export Full Report")
+        
+        if st.button("Generate HTML Report"):
+            with st.spinner("Generating report..."):
+                # Create a full HTML report with all visualizations
+                # This would be more complex to implement fully
+                
+                st.success("Report generated successfully!")
+                
+                # Placeholder for the actual implementation
+                report_html = """
+                <html>
+                <head>
+                    <title>Sentiment Analysis Dashboard Report</title>
+                    <style>
+                        body { font-family: Arial, sans-serif; margin: 20px; }
+                        h1 { color: #1E88E5; }
+                        h2 { color: #4CAF50; }
+                        .container { margin: 20px 0; }
+                        .metric { display: inline-block; padding: 10px; margin: 5px; background: #f5f5f5; border-radius: 5px; }
+                    </style>
+                </head>
+                <body>
+                    <h1>Sentiment Analysis Dashboard Report</h1>
+                    <p>Generated on {}</p>
+                    
+                    <div class="container">
+                        <h2>Performance Summary</h2>
+                        <div class="metric">Accuracy: {:.4f}</div>
+                        <div class="metric">Precision: {:.4f}</div>
+                        <div class="metric">Recall: {:.4f}</div>
+                        <div class="metric">F1 Score: {:.4f}</div>
+                    </div>
+                    
+                    <p>This is a placeholder for the full report. Download the CSV for detailed results.</p>
+                </body>
+                </html>
+                """.format(
+                    time.strftime("%Y-%m-%d %H:%M:%S"),
+                    cm_data['accuracy'],
+                    cm_data['precision'],
+                    cm_data['recall'],
+                    cm_data['f1']
+                )
+                
+                # Encode HTML to download
+                b64 = base64.b64encode(report_html.encode()).decode()
+                href = f'<a href="data:text/html;base64,{b64}" download="sentiment_analysis_report.html">Download HTML Report</a>'
+                st.markdown(href, unsafe_allow_html=True)
+    else:
+        st.info("Please run the analysis on the 'Dataset Analysis' tab first to see results here.")
 
-# Add visualization for confidence distribution
-st.markdown("### Confidence Distribution")
+# Single Text Analysis interface
+st.markdown("---")
+st.markdown('<h2 class="sub-header">📝 Single Text Analysis</h2>', unsafe_allow_html=True)
 
-fig = px.histogram(
-    results_df,
-    x="confidence",
-    color="predicted_sentiment",
-    marginal="box",
-    nbins=30,
-    color_discrete_map={
-        "positive": "#4CAF50",
-        "negative": "#F44336"
-    },
-    labels={"confidence": "Confidence Score", "predicted_sentiment": "Predicted Sentiment"},
-    title="Confidence Score Distribution by Predicted Sentiment"
-)
-st.plotly_chart(fig)
-
-# Add export options
-st.markdown("### Export Results")
-
-# Generate downloadable CSV
-csv = results_df.to_csv(index=False, encoding='utf-8')
-b64 = base64.b64encode(csv.encode()).decode()
-href = f'<a href="data:file/csv;base64,{b64}" download="sentiment_analysis_results.csv">Download Complete Results</a>'
-st.markdown(href, unsafe_allow_html=True)
-
-# Generate a detailed report
-if st.button("Generate Detailed Report"):
-    with st.spinner("Creating detailed report..."):
-        # Create a new dataframe for the report
-        report_df = pd.DataFrame({
-            "Metric": ["Total Samples", "Correct Predictions", "Incorrect Predictions", 
-                    "Accuracy", "Precision", "Recall", "F1 Score",
-                    "True Positives", "True Negatives", 
-                    "False Positives", "False Negatives"],
-            "Value": [
-                len(results_df),
-                len(results_df[results_df["predicted_sentiment"] == results_df["true_sentiment"]]),
-                len(results_df[results_df["predicted_sentiment"] != results_df["true_sentiment"]]),
-                cm_data["accuracy"], 
-                cm_data["precision"], 
-                cm_data["recall"], 
-                cm_data["f1"],
-                cm[0][0],  # True positives
-                cm[1][1],  # True negatives
-                cm[1][0],  # False positives
-                cm[0][1]   # False negatives
-            ]
-        })
-        
-        st.dataframe(report_df, hide_index=True)
-        
-        # Create downloadable report
-        report_csv = report_df.to_csv(index=False, encoding='utf-8')
-        b64_report = base64.b64encode(report_csv.encode()).decode()
-        href_report = f'<a href="data:file/csv;base64,{b64_report}" download="sentiment_analysis_report.csv">Download Metrics Report</a>'
-        st.markdown(href_report, unsafe_allow_html=True)
-        
-        st.success("Report generated successfully!")
+if st.session_state['sentiment_analyzer'] is not None:
+    # Text input for single analysis
+    text_input = st.text_area("Enter text to analyze", height=150)
+    
+    if text_input:
+        if st.button("Analyze Text"):
+            with st.spinner("Analyzing..."):
+                sentiment, confidence = analyze_sentiment(text_input, st.session_state['sentiment_analyzer'])
+                
+                # Display the result
+                st.markdown(f"### Sentiment: {sentiment.capitalize()}")
+                
+                # Show result with appropriate styling
+                if sentiment == "positive":
+                    st.markdown(f'<div class="result-box positive"><h3>😊 Positive Sentiment</h3><p>Confidence: {confidence:.4f}</p></div>', unsafe_allow_html=True)
+                elif sentiment == "neutral":
+                    st.markdown(f'<div class="result-box neutral"><h3>😐 Neutral Sentiment</h3><p>Confidence: {confidence:.4f}</p></div>', unsafe_allow_html=True)
+                else:
+                    st.markdown(f'<div class="result-box negative"><h3>😔 Negative Sentiment</h3><p>Confidence: {confidence:.4f}</p></div>', unsafe_allow_html=True)
+                
+                # Show confidence meter
+                st.markdown("### Confidence")
+                fig = go.Figure(go.Indicator(
+                    mode="gauge+number",
+                    value=confidence,
+                    domain={'x': [0, 1], 'y': [0, 1]},
+                    gauge={
+                        'axis': {'range': [0, 1]},
+                        'bar': {'color': "darkblue"},
+                        'steps': [
+                            {'range': [0, 0.33], 'color': "lightgray"},
+                            {'range': [0.33, 0.67], 'color': "gray"},
+                            {'range': [0.67, 1], 'color': "darkgray"}
+                        ],
+                        'threshold': {
+                            'line': {'color': "red", 'width': 4},
+                            'thickness': 0.75,
+                            'value': 0.5
+                        }
+                    }
+                ))
+                
+                fig.update_layout(height=300)
+                st.plotly_chart(fig, use_container_width=True)
 else:
-    # Show an interactive table of results
-    st.markdown("### Interactive Results Explorer")
-    
-    # Add filters
-    st.markdown("Filter by:")
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        sentiment_filter = st.multiselect(
-            "Predicted Sentiment",
-            options=["positive", "negative"],
-            default=["positive", "negative"]
-        )
-    
-    with col2:
-        agreement_filter = st.radio(
-            "Prediction Agreement",
-            options=["All", "Correct Predictions", "Incorrect Predictions"]
-        )
-    
-    # Apply filters
-    filtered_df = results_df.copy()
-    
-    if sentiment_filter:
-        filtered_df = filtered_df[filtered_df["predicted_sentiment"].isin(sentiment_filter)]
-    
-    if agreement_filter == "Correct Predictions":
-        filtered_df = filtered_df[filtered_df["predicted_sentiment"] == filtered_df["true_sentiment"]]
-    elif agreement_filter == "Incorrect Predictions":
-        filtered_df = filtered_df[filtered_df["predicted_sentiment"] != filtered_df["true_sentiment"]]
-    
-    # Show the filtered results
-    st.dataframe(filtered_df[[text_column, "predicted_sentiment", "true_sentiment", "confidence"]])
+    st.warning("Please load a model from the sidebar first to use this feature.")
+
+# Footer
+st.markdown("---")
+st.markdown("""
+<div style="text-align: center; color: gray; font-size: 0.8em;">
+    Sentiment Analysis Evaluation Dashboard | Created with Streamlit
+</div>
+""", unsafe_allow_html=True)
