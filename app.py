@@ -93,7 +93,7 @@ def load_sentiment_model(model_name):
                 model_id = "cardiffnlp/twitter-roberta-base-sentiment"
             else:  # Fine-tuned model
                 progress_text.text("Loading finiteautomata/bertweet-base-sentiment-analysis model...")
-                model_id = "finiteautomata/bertweet-base-sentiment-analysis"
+                model_id = "adv1102/bertweet-sentiment-finetuned"
             
             # Add error handling for offline or connection issues
             try:
